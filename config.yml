@@ -1,0 +1,16 @@
+---
+server: nameserver.net.
+zone: zone.net.
+hostname: hostname.zone.net
+key:
+  id: acme
+  algorithm: hmac-sha256
+  secret: hmac-secret
+letsencrypt:
+  contacts: [ "mailto:example@example.com" ]
+  store: /var/lib/certs/
+addresses:
+  ipv4:
+    enabled: false
+  ipv6:
+    enabled: true
