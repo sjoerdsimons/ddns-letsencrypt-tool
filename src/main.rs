@@ -91,7 +91,7 @@ async fn ensure_txt_is_on_server(server: &str, name: &str, value: &str) -> Resul
 }
 
 async fn ensure_txt_is_everywhere(config: &Config, name: &str, value: &str) -> Result<()> {
-    info!("Going to check if {name} is updated on all nameserver");
+    info!("Going to check if {name} is updated on all nameservers");
     let answer = query_server(
         &config.server,
         (Dname::<Vec<u8>>::from_str(&config.zone)?, Rtype::Ns),
