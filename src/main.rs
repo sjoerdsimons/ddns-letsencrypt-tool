@@ -1,5 +1,5 @@
 use address_monitor::AddressMonitor;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use domain::{
     base::{Dname, Question, Rtype, ToDname},
@@ -71,10 +71,12 @@ async fn query_server<N: ToDname, Q: Into<Question<N>>>(
 
 async fn ensure_txt_is_on_server(server: &str, name: &str, value: &str) -> Result<()> {
     'retry: loop {
-        let answer = query_server(server, (Dname::<Vec<u8>>::from_str(name)?, Rtype::Txt)).await?;
-        let answer = answer.answer()?;
+        let answer = query_server(server, (Dname::<Vec<u8>>::from_str(name)?, Rtype::Txt))
+            .await
+            .context("Failed to query server")?;
+        let answer = answer.answer().context("Invalid txt answer from server")?;
         for record in answer.limit_to_in::<domain::rdata::Txt<_>>() {
-            let record = record?;
+            let Ok(record) = record else {warn!("Invalid txt reply"); break} ;
             let txt = record.data().to_string();
             if txt == value {
                 info!("Update TXT value present on {}", server);
@@ -96,10 +98,11 @@ async fn ensure_txt_is_everywhere(config: &Config, name: &str, value: &str) -> R
         &config.server,
         (Dname::<Vec<u8>>::from_str(&config.zone)?, Rtype::Ns),
     )
-    .await?;
-    let answer = answer.answer()?;
+    .await
+    .context("Failed to query nameservers")?;
+    let answer = answer.answer().context("No valid nameserver answer")?;
     for record in answer.limit_to_in::<domain::rdata::Ns<_>>() {
-        let record = record?;
+        let record = record.context("Invalid NS answer")?;
         let nameserver = record.data().nsdname().to_string();
         info!("Going to check if {name} is updated on {nameserver}");
         ensure_txt_is_on_server(&nameserver, name, value).await?;
@@ -158,9 +161,17 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
         update.txt_update(&challenge_name, 60, &challenge_value)?;
         update.update().await?;
 
-        ensure_txt_is_everywhere(config, &challenge_name, &challenge_value).await?;
-
-        order.set_challenge_ready(&challenge.url).await?;
+        for i in 0.. {
+            match ensure_txt_is_everywhere(config, &challenge_name, &challenge_value).await {
+                Ok(_) => {
+                    order.set_challenge_ready(&challenge.url).await?;
+                    break;
+                }
+                e if i < 128 => warn!("Failed to ensure txt records: {e:?}"),
+                Err(e) => return Err(e.into()),
+            }
+            tokio::time::sleep(Duration::from_secs(120)).await;
+        }
     }
 
     let state = loop {
@@ -200,8 +211,15 @@ async fn letsencrypt_loop(config: &Config, le: &LetsEncryptConfig) -> Result<()>
             info!("Renewing certificate in {}s", duration.as_secs());
             sleep(duration).await;
         }
-        let (chain, key) = letsencrypt(config, le).await?;
-        store.insert_certificate(chain, key).await?;
+        info!("Renewing certificate");
+        match letsencrypt(config, le).await {
+            Ok((chain, key)) => store.insert_certificate(chain, key).await?,
+            Err(e) => {
+                warn!("Failed to get new letsencrypt certificate: {e:?}");
+                warn!("Retrying in 15 minutes");
+                tokio::time::sleep(Duration::from_secs(60 * 16)).await;
+            }
+        }
     }
 }
 

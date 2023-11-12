@@ -63,6 +63,10 @@ impl CertStore {
         };
 
         let left = validity.time_to_expiration()?;
+        info!(
+            "Certificate will expire on {} in {}",
+            validity.not_after, left
+        );
         if left < renew_slack {
             None
         } else {
