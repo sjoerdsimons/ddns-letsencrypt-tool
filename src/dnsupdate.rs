@@ -2,6 +2,7 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use domain::base::message_builder::AuthorityBuilder;
+use domain::rdata::tsig::Time48;
 use domain::rdata::Txt;
 use domain::rdata::A;
 use domain::tsig;
@@ -149,33 +150,32 @@ impl Update {
     }
 
     fn delete_old(&self, builder: &mut AuthorityBuilder<Vec<u8>>) -> Result<()> {
-        let empty =
-            domain::base::octets::OctetsBuilder::freeze(std::borrow::Cow::<[u8]>::Borrowed(&[]));
-        let empty = domain::base::UnknownRecordData::from_octets(Rtype::A, empty);
+        let empty = domain::base::UnknownRecordData::from_octets(Rtype::Aaaa, &[]).unwrap();
+        // Delete A records for hosts getting an update
         for a in self.hosts_with_a_records() {
             info!("Deleting A for {}", a);
             builder.push((a, Class::Any, 0, empty.clone()))?;
         }
+        // Delete A records for hosts that should be cleared
         for a in self.clear.iter().filter(|a| a.1 == Rtype::A) {
             info!("Deleting A for {}", a.0);
             builder.push((&a.0, Class::Any, 0, empty.clone()))?;
         }
 
-        let empty =
-            domain::base::octets::OctetsBuilder::freeze(std::borrow::Cow::<[u8]>::Borrowed(&[]));
-        let empty = domain::base::UnknownRecordData::from_octets(Rtype::Aaaa, empty);
+        let empty = domain::base::UnknownRecordData::from_octets(Rtype::Aaaa, &[]).unwrap();
+        // Delete AAAA records for hosts getting an update
         for a in self.hosts_with_aaaa_records() {
             info!("Deleting AAAA for {}", a);
             builder.push((a, Class::Any, 0, empty.clone()))?;
         }
+
+        // Delete AAAA records for hosts that should be cleared
         for a in self.clear.iter().filter(|a| a.1 == Rtype::Aaaa) {
             info!("Deleting AAAA for {}", a.0);
             builder.push((&a.0, Class::Any, 0, empty.clone()))?;
         }
 
-        let empty =
-            domain::base::octets::OctetsBuilder::freeze(std::borrow::Cow::<[u8]>::Borrowed(&[]));
-        let empty = domain::base::UnknownRecordData::from_octets(Rtype::Txt, empty);
+        let empty = domain::base::UnknownRecordData::from_octets(Rtype::Txt, &[]).unwrap();
         for a in self.hosts_with_txt_records() {
             info!("Deleting TXT for {}", a);
             builder.push((a, Class::Any, 0, empty.clone()))?;
@@ -201,7 +201,7 @@ impl Update {
             builder.push((
                 &t.name,
                 t.ttl,
-                Txt::<Vec<u8>>::from_slice(t.txt.as_bytes())?,
+                Txt::<Vec<u8>>::build_from_slice(t.txt.as_bytes())?,
             ))?;
         }
         Ok(())
@@ -224,8 +224,9 @@ impl Update {
 
         let mut additional = authority.additional();
         let key: tsig::Key = self.key.try_into().context("Failed to create tsig key")?;
-        let mut sequence = domain::tsig::ClientSequence::request(&key, &mut additional)
-            .context("Failed to sign request")?;
+        let mut sequence =
+            domain::tsig::ClientSequence::request(&key, &mut additional, Time48::now())
+                .context("Failed to sign request")?;
 
         let msg = additional.into_message();
 
@@ -255,7 +256,7 @@ impl Update {
         };
 
         sequence
-            .answer(&mut answer)
+            .answer(&mut answer, Time48::now())
             .context("Unexpected answer to update")?;
         sequence
             .done()

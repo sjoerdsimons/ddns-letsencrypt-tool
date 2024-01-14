@@ -7,12 +7,16 @@ use ipnetwork::IpNetwork;
 use netlink_packet_core::NetlinkMessage;
 use netlink_packet_core::NetlinkPayload;
 use netlink_packet_route::address;
-use netlink_packet_route::constants::*;
+use netlink_packet_route::address::AddressAttribute;
+use netlink_packet_route::address::AddressMessage;
+use netlink_packet_route::address::AddressScope;
+//use netlink_packet_route::constants::*;
 use netlink_packet_route::link;
-use netlink_packet_route::nlas::link::State;
-use netlink_packet_route::AddressMessage;
-use netlink_packet_route::LinkMessage;
-use netlink_packet_route::RtnlMessage;
+use netlink_packet_route::link::LinkAttribute;
+use netlink_packet_route::link::LinkFlag;
+use netlink_packet_route::link::LinkMessage;
+use netlink_packet_route::link::State;
+use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::{AsyncSocket, SocketAddr};
 use rtnetlink::{
     constants::{RTMGRP_IPV4_IFADDR, RTMGRP_IPV6_IFADDR, RTMGRP_LINK},
@@ -38,7 +42,7 @@ pub enum ListenError {
 pub struct Address {
     pub ip: IpNetwork,
     pub interface: u32,
-    pub flags: u32,
+    //pub flags: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,7 +69,10 @@ struct Link {
 
 pub struct AddressMonitor {
     links: HashMap<Link, LinkInfo>,
-    messages: futures::channel::mpsc::UnboundedReceiver<(NetlinkMessage<RtnlMessage>, SocketAddr)>,
+    messages: futures::channel::mpsc::UnboundedReceiver<(
+        NetlinkMessage<RouteNetlinkMessage>,
+        SocketAddr,
+    )>,
 }
 
 impl AddressMonitor {
@@ -112,7 +119,7 @@ impl AddressMonitor {
     }
 
     fn parse_link_message(msg: &LinkMessage) -> Option<(Link, &str, State)> {
-        if (msg.header.flags & IFF_LOOPBACK) == IFF_LOOPBACK {
+        if msg.header.flags.contains(&LinkFlag::Loopback) {
             return None;
         }
         let link = Link {
@@ -121,10 +128,10 @@ impl AddressMonitor {
         let mut ifname: Option<&str> = None;
         let mut state: Option<State> = None;
 
-        for nla in &msg.nlas {
+        for nla in &msg.attributes {
             match nla {
-                link::nlas::Nla::IfName(i) => ifname = Some(i),
-                link::nlas::Nla::OperState(s) => state = Some(*s),
+                LinkAttribute::IfName(i) => ifname = Some(i),
+                LinkAttribute::OperState(s) => state = Some(*s),
                 _ => (),
             }
         }
@@ -162,42 +169,24 @@ impl AddressMonitor {
     }
 
     fn parse_address_message(msg: &AddressMessage) -> Option<(Link, Address)> {
-        if msg.header.scope != RT_SCOPE_UNIVERSE {
+        if msg.header.scope != AddressScope::Universe {
             return None;
         }
 
         let link = Link {
             index: msg.header.index,
         };
-        let mut addr: Option<&Vec<u8>> = None;
-        let mut flags = 0;
-        for nla in &msg.nlas {
-            match nla {
-                address::nlas::Nla::Address(a) => {
-                    addr = Some(a);
-                }
-                address::nlas::Nla::Flags(f) => flags = *f,
-                _ => (),
-            }
-        }
-        if let Some(addr) = addr {
-            let ip = match addr.len() {
-                4 => Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]).into(),
-                16 => {
-                    let ary: [u8; 16] = addr.as_slice().try_into().unwrap();
-                    ary.into()
-                }
-                _ => {
-                    warn!("Unrecognized address length: {}", addr.len());
-                    return None;
-                }
-            };
 
-            let ip = IpNetwork::new(ip, msg.header.prefix_len).ok()?;
+        let ip = msg.attributes.iter().find_map(|a| match a {
+            AddressAttribute::Address(ip) => Some(ip),
+            _ => None,
+        });
+
+        if let Some(ip) = ip {
+            let ip = IpNetwork::new(*ip, msg.header.prefix_len).ok()?;
             let address = Address {
                 ip,
                 interface: link.index,
-                flags,
             };
             Some((link, address))
         } else {
@@ -245,20 +234,22 @@ impl AddressMonitor {
         // handle link changes
         if let Some((msg, _)) = self.messages.next().await {
             match msg.payload {
-                NetlinkPayload::InnerMessage(RtnlMessage::NewLink(link)) => {
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewLink(link)) => {
                     self.handle_new_link(&link).await;
                 }
-                NetlinkPayload::InnerMessage(RtnlMessage::DelLink(link)) => {
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelLink(link)) => {
                     self.handle_del_link(&link).await;
                 }
-                NetlinkPayload::InnerMessage(RtnlMessage::NewAddress(addr)) => {
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewAddress(addr)) => {
                     self.handle_add_addr(&addr).await;
                 }
-                NetlinkPayload::InnerMessage(RtnlMessage::DelAddress(addr)) => {
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::DelAddress(addr)) => {
                     self.handle_rm_addr(&addr).await;
                 }
                 NetlinkPayload::Error(err) => {
-                    return Err(ListenError::NetlinkError { code: err.code });
+                    return Err(ListenError::NetlinkError {
+                        code: err.raw_code(),
+                    });
                 }
                 _ => {}
             }
