@@ -6,12 +6,10 @@ use futures::stream::TryStreamExt;
 use ipnetwork::IpNetwork;
 use netlink_packet_core::NetlinkMessage;
 use netlink_packet_core::NetlinkPayload;
-use netlink_packet_route::address;
+
 use netlink_packet_route::address::AddressAttribute;
 use netlink_packet_route::address::AddressMessage;
 use netlink_packet_route::address::AddressScope;
-//use netlink_packet_route::constants::*;
-use netlink_packet_route::link;
 use netlink_packet_route::link::LinkAttribute;
 use netlink_packet_route::link::LinkFlag;
 use netlink_packet_route::link::LinkMessage;
@@ -23,8 +21,7 @@ use rtnetlink::{
     new_connection,
 };
 use std::collections::{HashMap, HashSet};
-use std::convert::TryInto;
-use std::net::Ipv4Addr;
+
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 

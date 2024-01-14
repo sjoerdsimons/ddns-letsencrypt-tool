@@ -119,25 +119,26 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
     } else {
         LetsEncrypt::Staging.url()
     };
-    let account = Account::create(
+    let (account, _) = Account::create(
         &NewAccount {
             contact: contacts.as_slice(),
             terms_of_service_agreed: true,
             only_return_existing: false,
         },
         url,
+        None,
     )
     .await?;
 
     let identifier = Identifier::Dns(config.hostname.clone());
-    let (mut order, state) = account
+    let mut order = account
         .new_order(&NewOrder {
             identifiers: &[identifier],
         })
         .await?;
 
-    info!("order state: {:#?}", state);
-    let authorizations = order.authorizations(&state.authorizations).await?;
+    info!("order state: {:#?}", order.state().status);
+    let authorizations = order.authorizations().await?;
     println!("=> {:?}", authorizations);
 
     for authz in &authorizations {
@@ -176,7 +177,7 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
 
     let state = loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let state = order.state().await?;
+        let state = order.refresh().await?;
         if matches!(state.status, OrderStatus::Ready | OrderStatus::Invalid) {
             break state;
         }
@@ -187,7 +188,7 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
     update.clear_txt(&format!("_acme-challenge.{}", &config.hostname))?;
     update.update().await?;
 
-    info!("Certificate order state {:?}", state);
+    info!("Certificate order state {:?}", state.status);
 
     if state.status == OrderStatus::Ready {
         let mut params = CertificateParams::new([config.hostname.clone()]);
@@ -195,7 +196,13 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
         let cert = Certificate::from_params(params)?;
         let csr = cert.serialize_request_der()?;
 
-        let cert_chain_pem = order.finalize(&csr, &state.finalize).await?;
+        order.finalize(&csr).await?;
+
+        let cert_chain_pem = order
+            .certificate()
+            .await?
+            .ok_or_else(|| anyhow!("Didn't get a certificate"))?;
+
         Ok((cert_chain_pem, cert.serialize_private_key_pem()))
     } else {
         bail!("Failed to retrieve certificate")
