@@ -209,18 +209,24 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
     }
 }
 
-async fn letsencrypt_loop(config: &Config, le: &LetsEncryptConfig) -> Result<()> {
+async fn letsencrypt_loop(config: &Config, le: &LetsEncryptConfig, mut force_update: bool) -> Result<()> {
     let store = certstore::CertStore::new(config.hostname.clone(), le.store.clone());
 
     loop {
         store.cleanup_expired_certificates().await?;
         if let Some(duration) = store.duration_till_renewal().await {
-            info!("Renewing certificate in {}s", duration.as_secs());
-            sleep(duration).await;
+            if force_update {
+                info!("Forcing certificate renewal");
+            } else {
+                sleep(duration).await;
+            }
         }
         info!("Renewing certificate");
         match letsencrypt(config, le).await {
-            Ok((chain, key)) => store.insert_certificate(chain, key).await?,
+            Ok((chain, key)) => {
+                store.insert_certificate(chain, key).await?;
+                force_update = false;
+            }
             Err(e) => {
                 warn!("Failed to get new letsencrypt certificate: {e:?}");
                 warn!("Retrying in 15 minutes");
@@ -327,6 +333,9 @@ async fn monitor_address(config: &Config) -> Result<()> {
 #[derive(clap::Parser, Debug, Clone)]
 struct Opts {
     config: PathBuf,
+    /// Force an update of the LE certificate on startup
+    #[clap(short, long)]
+    force_le_update: bool,
 }
 
 #[tokio::main]
@@ -340,7 +349,7 @@ async fn main() -> Result<()> {
     let monitor = monitor_address(&config);
 
     if let Some(le) = &config.letsencrypt {
-        let le_loop = letsencrypt_loop(&config, le);
+        let le_loop = letsencrypt_loop(&config, le, opts.force_le_update);
 
         tokio::select! {
             m = monitor => {
