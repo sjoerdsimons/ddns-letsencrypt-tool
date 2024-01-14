@@ -139,7 +139,6 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
 
     info!("order state: {:#?}", order.state().status);
     let authorizations = order.authorizations().await?;
-    println!("=> {:?}", authorizations);
 
     for authz in &authorizations {
         match &authz.status {

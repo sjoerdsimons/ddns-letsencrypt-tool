@@ -237,7 +237,7 @@ impl Update {
             .next()
             .ok_or_else(|| anyhow!("No address for {}", self.server))?;
 
-        println!("Sending update to {:?}", addr);
+        info!("Sending update request to {:?}", addr);
         let socket = match addr {
             std::net::SocketAddr::V4(_) => tokio::net::UdpSocket::bind("0.0.0.0:0").await?,
             std::net::SocketAddr::V6(_) => tokio::net::UdpSocket::bind("[::]:0").await?,
