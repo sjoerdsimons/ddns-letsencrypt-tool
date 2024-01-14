@@ -1,0 +1,13 @@
+[Unit]
+Description=DDNS and letsencrypt updated
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/ddns-letsencrypt-tool /etc/ddns-letsencrypt/config.yaml
+User=ddns-letsencrypt
+KillMode=process
+Restart=on-failure
+Type=simple
+
+[Install]
+WantedBy=multi-user.target
