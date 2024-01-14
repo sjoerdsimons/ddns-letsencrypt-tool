@@ -168,7 +168,7 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
                     break;
                 }
                 e if i < 128 => warn!("Failed to ensure txt records: {e:?}"),
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
             tokio::time::sleep(Duration::from_secs(120)).await;
         }
@@ -256,6 +256,26 @@ fn find_best_v6(m: &AddressMonitor) -> Option<Ipv6Network> {
         })
 }
 
+async fn update_addresses(
+    v4: Option<Ipv4Network>,
+    v6: Option<Ipv6Network>,
+    config: &Config,
+) -> Result<()> {
+    let mut update = dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
+    if let Some(ip) = v4 {
+        update.address_update(&config.hostname, 300, IpAddr::V4(ip.ip()))?;
+    } else {
+        update.clear_a(&config.hostname)?;
+    }
+    if let Some(ip) = v6 {
+        update.address_update(&config.hostname, 300, IpAddr::V6(ip.ip()))?;
+    } else {
+        update.clear_aaaa(&config.hostname)?;
+    }
+    update.update().await?;
+    Ok(())
+}
+
 async fn monitor_address(config: &Config) -> Result<()> {
     let mut am = AddressMonitor::new().await?;
     let mut current_best_v4 = None;
@@ -268,7 +288,6 @@ async fn monitor_address(config: &Config) -> Result<()> {
             None
         };
         if current_best_v4 != best_v4 {
-            current_best_v4 = best_v4;
             changed = true;
         }
 
@@ -279,24 +298,20 @@ async fn monitor_address(config: &Config) -> Result<()> {
         };
 
         if current_best_v6 != best_v6 {
-            current_best_v6 = best_v6;
             changed = true;
         }
 
         if changed {
-            let mut update =
-                dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
-            if let Some(ip) = best_v4 {
-                update.address_update(&config.hostname, 300, IpAddr::V4(ip.ip()))?;
+            if let Err(e) = update_addresses(best_v4, best_v6, config).await {
+                warn!("Failed to update address: {e}");
+                match tokio::time::timeout(Duration::from_secs(10), am.wait_for_event()).await {
+                    Ok(Err(e)) => return Err(e.into()),
+                    _ => continue,
+                }
             } else {
-                update.clear_a(&config.hostname)?;
+                current_best_v4 = best_v4;
+                current_best_v6 = best_v6;
             }
-            if let Some(ip) = best_v6 {
-                update.address_update(&config.hostname, 300, IpAddr::V6(ip.ip()))?;
-            } else {
-                update.clear_aaaa(&config.hostname)?;
-            }
-            update.update().await?;
         }
         am.wait_for_event().await?;
     }
@@ -323,17 +338,16 @@ async fn main() -> Result<()> {
         tokio::select! {
             m = monitor => {
                 warn!("Address monitor exited: {:?}", m);
+                return m;
             }
             l = le_loop => {
                 warn!("Certificate loop exited: {:?}", l);
+                return l;
             }
         }
     } else {
         monitor.await?;
     }
 
-    //let mut update = dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
-    //update.address_update(&config.hostname, 300, "2a10:3781:2531::8".parse()?)?;
-    //update.update().await?;
     Ok(())
 }
