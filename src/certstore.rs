@@ -163,11 +163,20 @@ impl CertStore {
             .await
             .context("Failed to write key to disk")?;
 
-        let mut current_path = hostpath.clone();
-        current_path.push("current");
-        tokio::fs::symlink(&certpath, &current_path)
+        let current_tmp = hostpath.join(".current.link");
+        let current = hostpath.join("current");
+
+        match tokio::fs::remove_file(&current_tmp).await {
+            Ok(_) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            e => e.context("Failed to remove temp symlink")?,
+        }
+        tokio::fs::symlink(&certpath, &current_tmp)
             .await
-            .context("Failed to create current symlink")?;
+            .context("Failed to create temporary symlink")?;
+        tokio::fs::rename(&current_tmp, &current)
+            .await
+            .context("Failed to put current symlink in place")?;
 
         Ok(())
     }
