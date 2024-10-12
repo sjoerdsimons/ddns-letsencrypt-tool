@@ -2,7 +2,7 @@ use address_monitor::AddressMonitor;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use domain::{
-    base::{Dname, Question, Rtype, ToDname},
+    base::{Name, Question, Rtype, ToName},
     resolv::stub,
 };
 use instant_acme::{
@@ -10,9 +10,9 @@ use instant_acme::{
     OrderStatus,
 };
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
-use rcgen::{Certificate, CertificateParams, DistinguishedName};
+use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use serde::Deserialize;
-use std::{net::IpAddr, path::PathBuf, str::FromStr, time::Duration};
+use std::{net::IpAddr, path::PathBuf, time::Duration};
 use tokio::{net::lookup_host, time::sleep};
 use tracing::{info, warn};
 
@@ -52,7 +52,7 @@ pub struct Config {
     addresses: AddressesConfig,
 }
 
-async fn query_server<N: ToDname, Q: Into<Question<N>>>(
+async fn query_server<N: ToName, Q: Into<Question<N>>>(
     server: &str,
     question: Q,
 ) -> Result<stub::Answer> {
@@ -61,7 +61,7 @@ async fn query_server<N: ToDname, Q: Into<Question<N>>>(
         .next()
         .ok_or_else(|| anyhow!("Couldn't resolv dns server"))?;
 
-    let conf = stub::conf::ServerConf::new(addr, stub::conf::Transport::Udp);
+    let conf = stub::conf::ServerConf::new(addr, stub::conf::Transport::UdpTcp);
     let mut resolvconf = stub::conf::ResolvConf::new();
     resolvconf.servers.push(conf);
     let stub = domain::resolv::StubResolver::from_conf(resolvconf);
@@ -71,18 +71,21 @@ async fn query_server<N: ToDname, Q: Into<Question<N>>>(
 
 async fn ensure_txt_is_on_server(server: &str, name: &str, value: &str) -> Result<()> {
     'retry: loop {
-        let answer = query_server(server, (Dname::<Vec<u8>>::from_str(name)?, Rtype::Txt))
+        let answer = query_server(server, (Name::vec_from_str(name)?, Rtype::TXT))
             .await
             .context("Failed to query server")?;
         let answer = answer.answer().context("Invalid txt answer from server")?;
         for record in answer.limit_to_in::<domain::rdata::Txt<_>>() {
-            let Ok(record) = record else {warn!("Invalid txt reply"); break} ;
-            let txt = record.data().to_string();
-            if txt == value {
+            let Ok(record) = record else {
+                warn!("Invalid txt reply");
+                break;
+            };
+            let txt = record.data();
+            if txt.as_flat_slice().unwrap_or_default() == value.as_bytes() {
                 info!("Update TXT value present on {}", server);
                 break 'retry;
             } else {
-                info!("Oudated TXT value present on {}", server);
+                info!("Outdated TXT value present on {} ({})", server, txt);
             }
         }
         info!("Record not yet present on {}", server);
@@ -96,7 +99,7 @@ async fn ensure_txt_is_everywhere(config: &Config, name: &str, value: &str) -> R
     info!("Going to check if {name} is updated on all nameservers");
     let answer = query_server(
         &config.server,
-        (Dname::<Vec<u8>>::from_str(&config.zone)?, Rtype::Ns),
+        (Name::vec_from_str(&config.zone)?, Rtype::NS),
     )
     .await
     .context("Failed to query nameservers")?;
@@ -190,25 +193,29 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
     info!("Certificate order state {:?}", state.status);
 
     if state.status == OrderStatus::Ready {
-        let mut params = CertificateParams::new([config.hostname.clone()]);
+        let keypair = KeyPair::generate()?;
+        let mut params = CertificateParams::new([config.hostname.clone()])?;
         params.distinguished_name = DistinguishedName::new();
-        let cert = Certificate::from_params(params)?;
-        let csr = cert.serialize_request_der()?;
+        let csr = params.serialize_request(&keypair)?;
 
-        order.finalize(&csr).await?;
+        order.finalize(csr.der()).await?;
 
         let cert_chain_pem = order
             .certificate()
             .await?
             .ok_or_else(|| anyhow!("Didn't get a certificate"))?;
 
-        Ok((cert_chain_pem, cert.serialize_private_key_pem()))
+        Ok((cert_chain_pem, keypair.serialize_pem()))
     } else {
         bail!("Failed to retrieve certificate")
     }
 }
 
-async fn letsencrypt_loop(config: &Config, le: &LetsEncryptConfig, mut force_update: bool) -> Result<()> {
+async fn letsencrypt_loop(
+    config: &Config,
+    le: &LetsEncryptConfig,
+    mut force_update: bool,
+) -> Result<()> {
     let store = certstore::CertStore::new(config.hostname.clone(), le.store.clone());
 
     loop {

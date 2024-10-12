@@ -87,10 +87,12 @@ impl CertStore {
 
         while let Some(entry) = r.next_entry().await.transpose() {
             if let Ok(entry) = entry {
-                let Ok(t) = entry.metadata().await else { continue };
+                let Ok(t) = entry.metadata().await else {
+                    continue;
+                };
                 if t.is_dir() {
                     info!("Looking at certificate {:?}", entry.file_name());
-                    let cert_path = hostpath.join(&entry.file_name());
+                    let cert_path = hostpath.join(entry.file_name());
                     let chain_path = cert_path.join("chain.pem");
                     let cert = match tokio::fs::read(chain_path).await {
                         Ok(cert) => cert,

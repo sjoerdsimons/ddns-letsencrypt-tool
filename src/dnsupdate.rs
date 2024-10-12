@@ -6,6 +6,7 @@ use domain::rdata::tsig::Time48;
 use domain::rdata::Txt;
 use domain::rdata::A;
 use domain::tsig;
+use domain::tsig::KeyName;
 use serde::Deserialize;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
@@ -18,7 +19,7 @@ use std::{net::IpAddr, str::FromStr};
 use domain::{
     base::{
         iana::{Class, Opcode},
-        Dname, MessageBuilder, Rtype,
+        MessageBuilder, Name, Rtype,
     },
     rdata::Aaaa,
     tsig::Algorithm,
@@ -41,7 +42,7 @@ impl TryInto<tsig::Key> for Key {
         Ok(domain::tsig::Key::new(
             self.algorithm,
             &self.secret,
-            Dname::from_str(&self.id)?,
+            KeyName::from_str(&self.id)?,
             None,
             None,
         )?)
@@ -50,14 +51,14 @@ impl TryInto<tsig::Key> for Key {
 
 #[derive(Debug, Clone)]
 struct AddressUpdate {
-    name: Dname<Vec<u8>>,
+    name: Name<Vec<u8>>,
     ttl: u32,
     address: IpAddr,
 }
 
 #[derive(Debug, Clone)]
 struct TxtUpdate {
-    name: Dname<Vec<u8>>,
+    name: Name<Vec<u8>>,
     ttl: u32,
     txt: String,
 }
@@ -69,7 +70,7 @@ pub struct Update {
     key: Key,
     address: Vec<AddressUpdate>,
     txt: Vec<TxtUpdate>,
-    clear: Vec<(Dname<Vec<u8>>, Rtype)>,
+    clear: Vec<(Name<Vec<u8>>, Rtype)>,
 }
 
 impl Update {
@@ -90,7 +91,7 @@ impl Update {
 
     pub fn address_update(&mut self, name: &str, ttl: u32, address: IpAddr) -> Result<()> {
         self.address.push(AddressUpdate {
-            name: Dname::from_str(name)?,
+            name: Name::from_str(name)?,
             ttl,
             address,
         });
@@ -98,18 +99,18 @@ impl Update {
     }
 
     pub fn clear_a(&mut self, name: &str) -> Result<()> {
-        self.clear.push((Dname::from_str(name)?, Rtype::A));
+        self.clear.push((Name::from_str(name)?, Rtype::A));
         Ok(())
     }
 
     pub fn clear_aaaa(&mut self, name: &str) -> Result<()> {
-        self.clear.push((Dname::from_str(name)?, Rtype::Aaaa));
+        self.clear.push((Name::from_str(name)?, Rtype::AAAA));
         Ok(())
     }
 
     pub fn txt_update<T: Into<String>>(&mut self, name: &str, ttl: u32, txt: T) -> Result<()> {
         self.txt.push(TxtUpdate {
-            name: Dname::from_str(name)?,
+            name: Name::from_str(name)?,
             ttl,
             txt: txt.into(),
         });
@@ -117,11 +118,11 @@ impl Update {
     }
 
     pub fn clear_txt(&mut self, name: &str) -> Result<()> {
-        self.clear.push((Dname::from_str(name)?, Rtype::Txt));
+        self.clear.push((Name::from_str(name)?, Rtype::TXT));
         Ok(())
     }
 
-    fn hosts_with_a_records(&self) -> impl Iterator<Item = &Dname<Vec<u8>>> {
+    fn hosts_with_a_records(&self) -> impl Iterator<Item = &Name<Vec<u8>>> {
         let mut hosts = HashSet::new();
         for a in &self.address {
             if a.address.is_ipv4() {
@@ -131,7 +132,7 @@ impl Update {
         hosts.into_iter()
     }
 
-    fn hosts_with_aaaa_records(&self) -> impl Iterator<Item = &Dname<Vec<u8>>> {
+    fn hosts_with_aaaa_records(&self) -> impl Iterator<Item = &Name<Vec<u8>>> {
         let mut hosts = HashSet::new();
         for a in &self.address {
             if a.address.is_ipv6() {
@@ -141,7 +142,7 @@ impl Update {
         hosts.into_iter()
     }
 
-    fn hosts_with_txt_records(&self) -> impl Iterator<Item = &Dname<Vec<u8>>> {
+    fn hosts_with_txt_records(&self) -> impl Iterator<Item = &Name<Vec<u8>>> {
         let mut hosts = HashSet::new();
         for t in &self.txt {
             hosts.insert(&t.name);
@@ -150,39 +151,39 @@ impl Update {
     }
 
     fn delete_old(&self, builder: &mut AuthorityBuilder<Vec<u8>>) -> Result<()> {
-        let empty = domain::base::UnknownRecordData::from_octets(Rtype::Aaaa, &[]).unwrap();
+        let empty = domain::base::UnknownRecordData::from_octets(Rtype::AAAA, &[]).unwrap();
         // Delete A records for hosts getting an update
         for a in self.hosts_with_a_records() {
             info!("Deleting A for {}", a);
-            builder.push((a, Class::Any, 0, empty.clone()))?;
+            builder.push((a, Class::ANY, 0, empty.clone()))?;
         }
         // Delete A records for hosts that should be cleared
         for a in self.clear.iter().filter(|a| a.1 == Rtype::A) {
             info!("Deleting A for {}", a.0);
-            builder.push((&a.0, Class::Any, 0, empty.clone()))?;
+            builder.push((&a.0, Class::ANY, 0, empty.clone()))?;
         }
 
-        let empty = domain::base::UnknownRecordData::from_octets(Rtype::Aaaa, &[]).unwrap();
+        let empty = domain::base::UnknownRecordData::from_octets(Rtype::AAAA, &[]).unwrap();
         // Delete AAAA records for hosts getting an update
         for a in self.hosts_with_aaaa_records() {
             info!("Deleting AAAA for {}", a);
-            builder.push((a, Class::Any, 0, empty.clone()))?;
+            builder.push((a, Class::ANY, 0, empty.clone()))?;
         }
 
         // Delete AAAA records for hosts that should be cleared
-        for a in self.clear.iter().filter(|a| a.1 == Rtype::Aaaa) {
+        for a in self.clear.iter().filter(|a| a.1 == Rtype::AAAA) {
             info!("Deleting AAAA for {}", a.0);
-            builder.push((&a.0, Class::Any, 0, empty.clone()))?;
+            builder.push((&a.0, Class::ANY, 0, empty.clone()))?;
         }
 
-        let empty = domain::base::UnknownRecordData::from_octets(Rtype::Txt, &[]).unwrap();
+        let empty = domain::base::UnknownRecordData::from_octets(Rtype::TXT, &[]).unwrap();
         for a in self.hosts_with_txt_records() {
             info!("Deleting TXT for {}", a);
-            builder.push((a, Class::Any, 0, empty.clone()))?;
+            builder.push((a, Class::ANY, 0, empty.clone()))?;
         }
-        for a in self.clear.iter().filter(|a| a.1 == Rtype::Txt) {
+        for a in self.clear.iter().filter(|a| a.1 == Rtype::TXT) {
             info!("Deleting TXT for {}", a.0);
-            builder.push((&a.0, Class::Any, 0, empty.clone()))?;
+            builder.push((&a.0, Class::ANY, 0, empty.clone()))?;
         }
 
         Ok(())
@@ -201,7 +202,8 @@ impl Update {
             builder.push((
                 &t.name,
                 t.ttl,
-                Txt::<Vec<u8>>::build_from_slice(t.txt.as_bytes())?,
+                Txt::<Vec<u8>>::build_from_slice(t.txt.as_bytes())
+                    .map_err(|e| anyhow!("Failed to append txt record: {e:?}"))?,
             ))?;
         }
         Ok(())
@@ -210,12 +212,12 @@ impl Update {
     pub async fn update(self) -> Result<()> {
         info!("Sending update");
         let mut builder = MessageBuilder::new_vec();
-        builder.header_mut().set_opcode(Opcode::Update);
+        builder.header_mut().set_opcode(Opcode::UPDATE);
         builder.header_mut().set_random_id();
 
         // Question section contains the zone
         let mut question = builder.question();
-        question.push((Dname::<Vec<u8>>::from_str(&self.zone).unwrap(), Rtype::Soa))?;
+        question.push((Name::<Vec<u8>>::from_str(&self.zone).unwrap(), Rtype::SOA))?;
 
         // Authority section has the updates; starting with deleting the *old* values
         let mut authority = question.authority();
