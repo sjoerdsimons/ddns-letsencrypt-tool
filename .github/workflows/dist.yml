@@ -43,6 +43,7 @@ jobs:
         run: |
           mkdir -v ${OUTDIR}
           cp -v target/*/release/ddns-letsencrypt-tool ${OUTDIR}
+          cp -v data/* ${OUTDIR}
           tar cvzf ${OUTDIR}.tar.gz ${OUTDIR}
       - name: Upload release binaries
         uses: actions/upload-artifact@v4
