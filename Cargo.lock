@@ -438,9 +438,8 @@ dependencies = [
 
 [[package]]
 name = "domain"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7eefe29e8dd614abbee51a1616654cab123c4c56850ab83f5b7f1e1f9977bf7c"
+version = "0.10.2"
+source = "git+https://github.com/NLnetLabs/domain?branch=fix-compile-with-feature-net#b7f5b77519256f6fed2205b076a2974bb8ce843e"
 dependencies = [
  "bytes",
  "futures-util",
