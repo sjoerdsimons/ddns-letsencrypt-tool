@@ -1,0 +1,40 @@
+name: test suite
+on:
+  push:
+    branches-ignore:
+        - "gh-readonly-queue/**"
+  pull_request:
+  merge_group:
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master # avoid the tag here to prevent dependabot from updating it
+        with:
+          toolchain: "1.81"
+      - run: cargo test --all-targets --all-features
+
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master # avoid the tag here to prevent dependabot from updating it
+        with:
+          toolchain: "1.81"
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master # avoid the tag here to prevent dependabot from updating it
+        with:
+          toolchain: "1.81"
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
