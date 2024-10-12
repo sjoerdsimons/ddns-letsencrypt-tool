@@ -9,6 +9,7 @@ key:
 letsencrypt:
   contacts: [ "mailto:example@example.com" ]
   store: /var/lib/certs/
+  production: true
 addresses:
   ipv4:
     enabled: false
