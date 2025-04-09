@@ -11,7 +11,7 @@ use netlink_packet_route::address::AddressAttribute;
 use netlink_packet_route::address::AddressMessage;
 use netlink_packet_route::address::AddressScope;
 use netlink_packet_route::link::LinkAttribute;
-use netlink_packet_route::link::LinkFlag;
+use netlink_packet_route::link::LinkFlags;
 use netlink_packet_route::link::LinkMessage;
 use netlink_packet_route::link::State;
 use netlink_packet_route::RouteNetlinkMessage;
@@ -116,7 +116,7 @@ impl AddressMonitor {
     }
 
     fn parse_link_message(msg: &LinkMessage) -> Option<(Link, &str, State)> {
-        if msg.header.flags.contains(&LinkFlag::Loopback) {
+        if msg.header.flags.contains(LinkFlags::Loopback) {
             return None;
         }
         let link = Link {
