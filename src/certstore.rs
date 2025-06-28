@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::{path::PathBuf, time::Duration};
 use tracing::{info, warn};
+use x509_parser::time::ASN1Time;
 
 #[derive(Debug)]
 pub struct CertStore {
@@ -79,6 +80,16 @@ impl CertStore {
     pub async fn cleanup_expired_certificates(&self) -> Result<()> {
         info!("Cleaning up certificates for {}", self.hostname);
         let hostpath = self.host_path();
+
+        let current = match tokio::fs::canonicalize(hostpath.join("current")).await {
+            Ok(p) => Some(p),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                warn!("Failed to resolve current certificate: {e}");
+                None
+            }
+        };
+
         let mut r = match tokio::fs::read_dir(&hostpath).await {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -93,6 +104,13 @@ impl CertStore {
                 if t.is_dir() {
                     info!("Looking at certificate {:?}", entry.file_name());
                     let cert_path = hostpath.join(entry.file_name());
+                    if current.as_ref() == Some(&cert_path) {
+                        info!(
+                            "{:?} is the current certificate, not cleaning up",
+                            entry.file_name()
+                        );
+                        continue;
+                    }
                     let chain_path = cert_path.join("chain.pem");
                     let cert = match tokio::fs::read(chain_path).await {
                         Ok(cert) => cert,
@@ -118,7 +136,16 @@ impl CertStore {
                         }
                     };
 
-                    if let Some(duration) = x509.validity().time_to_expiration() {
+                    let validity = x509.validity();
+                    let now = ASN1Time::now();
+                    if validity.not_before > now {
+                        info!(
+                            "{:?} not yet valid (assuming misconfigured host clock): now: {} NotBefore {}",
+                            entry.file_name(),
+                            now,
+                            validity.not_before
+                        );
+                    } else if let Some(duration) = x509.validity().time_to_expiration() {
                         info!("{:?} still valid for {}", entry.file_name(), duration);
                     } else {
                         info!("{:?} no longer valid, removing", entry.file_name());
