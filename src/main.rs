@@ -162,7 +162,7 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
         let mut update = dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
         // Very short time to live to get it flushed out early
         update.txt_update(&challenge_name, 60, &challenge_value)?;
-        update.update().await?;
+        update.update().await.context("DNS update")?;
 
         for i in 0.. {
             match ensure_txt_is_everywhere(config, &challenge_name, &challenge_value).await {

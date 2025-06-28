@@ -1,4 +1,5 @@
 use anyhow::anyhow;
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use domain::base::message_builder::AuthorityBuilder;
@@ -210,7 +211,7 @@ impl Update {
     }
 
     pub async fn update(self) -> Result<()> {
-        info!("Sending update");
+        info!("Sending update to DNS");
         let mut builder = MessageBuilder::new_vec();
         builder.header_mut().set_opcode(Opcode::UPDATE);
         builder.header_mut().set_random_id();
@@ -256,6 +257,10 @@ impl Update {
                 break answer;
             }
         };
+
+        if answer.is_error() {
+            bail!("Received an error answer: {}", answer.opt_rcode());
+        }
 
         sequence
             .answer(&mut answer, Time48::now())
