@@ -14,7 +14,7 @@ async-trait = "0.1.66"
 clap = { version = "4.1.8", features = ["derive"] }
 domain = { version = "0.11.0", features = ["serde", "tsig", "resolv", "tokio"] }
 futures = "0.3.27"
-instant-acme = "0.7.1"
+instant-acme = "0.8.2"
 ipnetwork = "0.21.1"
 netlink-packet-core = "0.7.0"
 netlink-packet-route = "0.24"
