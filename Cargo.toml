@@ -28,4 +28,4 @@ thiserror = "2.0.3"
 tokio = { version = "1.43.1", features = ["full"] }
 tracing = "0.1.37"
 tracing-subscriber = "0.3.16"
-x509-parser = "0.17"
+x509-parser = "0.18"
