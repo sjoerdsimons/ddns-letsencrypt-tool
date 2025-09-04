@@ -19,7 +19,7 @@ ipnetwork = "0.21.1"
 netlink-packet-core = "0.7.0"
 netlink-packet-route = "0.24"
 netlink-sys = "0.8.5"
-rcgen = "0.13"
+rcgen = "0.14"
 rtnetlink = "0.17.0"
 serde = { version = "1.0.154", features = ["derive"] }
 serde_with = { version = "3.4", features = ["base64"] }
