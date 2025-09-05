@@ -17,7 +17,7 @@ futures = "0.3.27"
 instant-acme = "0.8.2"
 ipnetwork = "0.21.1"
 netlink-packet-core = "0.7.0"
-netlink-packet-route = "0.24"
+netlink-packet-route = "0.25"
 netlink-sys = "0.8.5"
 rtnetlink = "0.17.0"
 serde = { version = "1.0.154", features = ["derive"] }
