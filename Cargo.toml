@@ -16,10 +16,10 @@ domain = { version = "0.11.0", features = ["serde", "tsig", "resolv", "tokio"] }
 futures = "0.3.27"
 instant-acme = "0.8.2"
 ipnetwork = "0.21.1"
-netlink-packet-core = "0.7.0"
-netlink-packet-route = "0.24"
+netlink-packet-core = "0.8"
+netlink-packet-route = "0.25.1"
 netlink-sys = "0.8.5"
-rtnetlink = "0.17.0"
+rtnetlink = "0.18"
 serde = { version = "1.0.154", features = ["derive"] }
 serde_with = { version = "3.4", features = ["base64"] }
 serde_yaml = "0.9.19"
