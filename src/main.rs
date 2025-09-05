@@ -7,10 +7,9 @@ use domain::{
 };
 use instant_acme::{
     Account, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
-    OrderStatus,
+    OrderStatus, RetryPolicy,
 };
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
-use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use serde::Deserialize;
 use std::{net::IpAddr, path::PathBuf, time::Duration};
 use tokio::{net::lookup_host, time::sleep};
@@ -122,42 +121,37 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
     } else {
         LetsEncrypt::Staging.url()
     };
-    let (account, _) = Account::create(
-        &NewAccount {
-            contact: contacts.as_slice(),
-            terms_of_service_agreed: true,
-            only_return_existing: false,
-        },
-        url,
-        None,
-    )
-    .await?;
-
-    let identifier = Identifier::Dns(config.hostname.clone());
-    let mut order = account
-        .new_order(&NewOrder {
-            identifiers: &[identifier],
-        })
+    let (account, _) = Account::builder()?
+        .create(
+            &NewAccount {
+                contact: contacts.as_slice(),
+                terms_of_service_agreed: true,
+                only_return_existing: false,
+            },
+            url.to_string(),
+            None,
+        )
         .await?;
 
-    info!("order state: {:#?}", order.state().status);
-    let authorizations = order.authorizations().await?;
+    let identifier = Identifier::Dns(config.hostname.clone());
+    let mut order = account.new_order(&NewOrder::new(&[identifier])).await?;
 
-    for authz in &authorizations {
+    info!("order state: {:#?}", order.state().status);
+    let mut authorizations = order.authorizations();
+
+    while let Some(mut authz) = authorizations.next().await.transpose()? {
         match &authz.status {
             AuthorizationStatus::Pending => {}
             AuthorizationStatus::Valid => continue,
             s => bail!("Unhandled authorization status: {:?}", s),
         }
 
-        let challenge = authz
-            .challenges
-            .iter()
-            .find(|c| c.r#type == ChallengeType::Dns01)
+        let mut challenge = authz
+            .challenge(ChallengeType::Dns01)
             .ok_or_else(|| anyhow!("No dns01 challenge found"))?;
 
         let challenge_name = format!("_acme-challenge.{}", &config.hostname);
-        let challenge_value = order.key_authorization(challenge).dns_value();
+        let challenge_value = challenge.key_authorization().dns_value();
 
         let mut update = dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
         // Very short time to live to get it flushed out early
@@ -167,7 +161,7 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
         for i in 0.. {
             match ensure_txt_is_everywhere(config, &challenge_name, &challenge_value).await {
                 Ok(_) => {
-                    order.set_challenge_ready(&challenge.url).await?;
+                    challenge.set_ready().await?;
                     break;
                 }
                 e if i < 128 => warn!("Failed to ensure txt records: {e:?}"),
@@ -177,35 +171,23 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
         }
     }
 
-    let state = loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let state = order.refresh().await?;
-        if matches!(state.status, OrderStatus::Ready | OrderStatus::Invalid) {
-            break state;
-        }
-    };
+    let status = order.poll_ready(&RetryPolicy::default()).await?;
 
     // Done; we can clear the TXT record
     let mut update = dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
     update.clear_txt(&format!("_acme-challenge.{}", &config.hostname))?;
     update.update().await?;
 
-    info!("Certificate order state {:?}", state.status);
+    info!("Certificate order state {:?}", status);
 
-    if state.status == OrderStatus::Ready {
-        let keypair = KeyPair::generate()?;
-        let mut params = CertificateParams::new([config.hostname.clone()])?;
-        params.distinguished_name = DistinguishedName::new();
-        let csr = params.serialize_request(&keypair)?;
-
-        order.finalize(csr.der()).await?;
-
+    if status == OrderStatus::Ready {
+        let keypair = order.finalize().await?;
         let cert_chain_pem = order
             .certificate()
             .await?
             .ok_or_else(|| anyhow!("Didn't get a certificate"))?;
 
-        Ok((cert_chain_pem, keypair.serialize_pem()))
+        Ok((cert_chain_pem, keypair))
     } else {
         bail!("Failed to retrieve certificate")
     }
