@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 use tracing::{info, warn};
 use x509_parser::time::ASN1Time;
 
@@ -20,10 +20,7 @@ impl CertStore {
         path
     }
 
-    // Time until the current certificate should be renewed; Returns None if it should be renewed
-    // immediately
-    pub async fn duration_till_renewal(&self) -> Option<Duration> {
-        info!("Determining renewal time");
+    pub async fn current_cert(&self) -> Option<x509_parser::pem::Pem> {
         let mut cert_path = self.host_path();
         cert_path.push("current");
         cert_path.push("chain.pem");
@@ -35,45 +32,12 @@ impl CertStore {
             }
         };
 
-        let pem = match x509_parser::pem::parse_x509_pem(&cert) {
-            Ok((_, pem)) => pem,
+        match x509_parser::pem::parse_x509_pem(&cert) {
+            Ok((_, pem)) => Some(pem),
             Err(e) => {
                 info!("Failed to parse current certificate: {}", e);
-                return None;
+                None
             }
-        };
-
-        let x509 = match pem.parse_x509() {
-            Ok(cert) => cert,
-            Err(e) => {
-                info!("Failed to parse current certificate: {}", e);
-                return None;
-            }
-        };
-        let validity = x509.validity();
-        let renew_slack = if let Some(period) = validity.not_after - validity.not_before {
-            info!(
-                "Total current certificate period {}, renewal after {}",
-                period,
-                period / 3 * 2
-            );
-            period.unsigned_abs() / 3
-        } else {
-            // If there is no validity period renew 7 days before expiry
-            Duration::from_secs(7 * 24 * 3600)
-        };
-
-        let left = validity.time_to_expiration()?;
-        info!(
-            "Certificate will expire on {} in {}",
-            validity.not_after, left
-        );
-        if left < renew_slack {
-            None
-        } else {
-            let residual = left - renew_slack;
-            info!("Time left to renewal: {}", residual);
-            Some(residual.unsigned_abs())
         }
     }
 

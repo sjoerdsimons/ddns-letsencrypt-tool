@@ -1,19 +1,22 @@
 use address_monitor::AddressMonitor;
 use anyhow::{anyhow, bail, Context, Result};
+use certstore::CertStore;
 use clap::Parser;
 use domain::{
     base::{Name, Question, Rtype, ToName},
     resolv::stub,
 };
 use instant_acme::{
-    Account, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
-    OrderStatus, RetryPolicy,
+    Account, AuthorizationStatus, CertificateIdentifier, ChallengeType, Identifier, LetsEncrypt,
+    NewAccount, NewOrder, OrderStatus, RetryPolicy,
 };
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
+use oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER;
 use serde::Deserialize;
 use std::{net::IpAddr, path::PathBuf, time::Duration};
 use tokio::{net::lookup_host, time::sleep};
 use tracing::{info, warn};
+use x509_parser::prelude::{ParsedExtension, X509Certificate};
 
 pub mod dnsupdate;
 use crate::dnsupdate::Key;
@@ -27,6 +30,30 @@ struct LetsEncryptConfig {
     #[serde(default)]
     production: bool,
     store: PathBuf,
+}
+
+impl LetsEncryptConfig {
+    async fn get_account(&self) -> Result<Account> {
+        let contacts: Vec<_> = self.contacts.iter().map(|s| s.as_str()).collect();
+
+        let url = if self.production {
+            LetsEncrypt::Production.url()
+        } else {
+            LetsEncrypt::Staging.url()
+        };
+        let (account, _) = Account::builder()?
+            .create(
+                &NewAccount {
+                    contact: &contacts,
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                url.to_string(),
+                None,
+            )
+            .await?;
+        Ok(account)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +73,7 @@ pub struct Config {
     server: String,
     zone: String,
     hostname: String,
+    profile: Option<String>,
     key: Key,
     letsencrypt: Option<LetsEncryptConfig>,
     addresses: AddressesConfig,
@@ -113,30 +141,18 @@ async fn ensure_txt_is_everywhere(config: &Config, name: &str, value: &str) -> R
     Ok(())
 }
 
-async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String, String)> {
-    let contacts: Vec<&str> = le.contacts.iter().map(|s| s.as_str()).collect();
-
-    let url = if le.production {
-        LetsEncrypt::Production.url()
+async fn request_certificate(account: &Account, config: &Config) -> Result<(String, String)> {
+    let identifiers = &[Identifier::Dns(config.hostname.clone())];
+    let order = NewOrder::new(identifiers);
+    let order = if let Some(profile) = &config.profile {
+        info!("Ordering certificate with profile: {profile}");
+        order.profile(profile)
     } else {
-        LetsEncrypt::Staging.url()
+        order
     };
-    let (account, _) = Account::builder()?
-        .create(
-            &NewAccount {
-                contact: contacts.as_slice(),
-                terms_of_service_agreed: true,
-                only_return_existing: false,
-            },
-            url.to_string(),
-            None,
-        )
-        .await?;
+    let mut order = account.new_order(&order).await?;
 
-    let identifier = Identifier::Dns(config.hostname.clone());
-    let mut order = account.new_order(&NewOrder::new(&[identifier])).await?;
-
-    info!("order state: {:#?}", order.state().status);
+    info!("Certificate order state: {:#?}", order.state().status);
     let mut authorizations = order.authorizations();
 
     while let Some(mut authz) = authorizations.next().await.transpose()? {
@@ -193,24 +209,148 @@ async fn letsencrypt(config: &Config, le: &LetsEncryptConfig) -> Result<(String,
     }
 }
 
+// Time until the current certificate should be renewed; Returns None if it should be renewed
+// immediately
+fn duration_till_renewal(x509: &X509Certificate) -> Option<Duration> {
+    let validity = x509.validity();
+    let renew_slack = if let Some(period) = validity.not_after - validity.not_before {
+        info!(
+            "Total current certificate period {}, renewal after {}",
+            period,
+            period / 3 * 2
+        );
+        period.unsigned_abs() / 3
+    } else {
+        // If there is no validity period renew 7 days before expiry
+        Duration::from_secs(7 * 24 * 3600)
+    };
+
+    let left = validity.time_to_expiration()?;
+    info!(
+        "Certificate will expire on {} in {}",
+        validity.not_after, left
+    );
+    if left < renew_slack {
+        None
+    } else {
+        let residual = left - renew_slack;
+        info!("Time left to renewal: {}", residual);
+        Some(residual.unsigned_abs())
+    }
+}
+
+async fn wait_for_renewal(account: &Account, store: &CertStore) {
+    let Some(cert) = store.current_cert().await else {
+        info!("No current certificate");
+        return;
+    };
+
+    let x509 = match cert.parse_x509() {
+        Ok(cert) => cert,
+        Err(e) => {
+            info!("Failed to parse current certificate: {}", e);
+            return;
+        }
+    };
+
+    let validity = x509.validity();
+    info!("Current certificate valid until: {}", validity.not_after);
+
+    let aki = match x509.get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER) {
+        Ok(aki) => aki,
+        Err(e) => {
+            warn!("Failed to parse Authority Key Identifier: {e}");
+            None
+        }
+    };
+
+    let identifier = aki.and_then(|o| match o.parsed_extension() {
+        ParsedExtension::AuthorityKeyIdentifier(aki) => aki.key_identifier.clone(),
+        _ => None,
+    });
+
+    if let Some(identifier) = identifier {
+        let identifier = CertificateIdentifier::new(identifier.0.into(), x509.raw_serial().into());
+
+        loop {
+            let (renewal, refresh) = match account.renewal_info(&identifier).await {
+                Ok(v) => v,
+                Err(instant_acme::Error::Unsupported(s)) => {
+                    warn!("Server doesn't support renewal info: {s}");
+                    break;
+                }
+                Err(e) => {
+                    warn!("Failed to get renewal request (retrying in 15m): {e}");
+                    tokio::time::sleep(Duration::from_secs(60 * 15)).await;
+                    continue;
+                }
+            };
+
+            let diff = renewal.suggested_window.end - renewal.suggested_window.start;
+            let diff = diff.try_into().unwrap_or_else(|_| {
+                warn!("Failed to convert diff: {diff:?}");
+                Duration::ZERO
+            });
+
+            let target = renewal.suggested_window.start + rand::random_range(Duration::ZERO..diff);
+            info!("Renewal target from info: {target:?}");
+            let remaining = target - std::time::SystemTime::now();
+            if remaining < refresh {
+                info!("sleeping till renewal: {remaining}");
+                info!(
+                    "sleeping till renewal: {}h{}m{}s",
+                    refresh.as_secs() / 3600,
+                    refresh.as_secs() % 3600 / 60,
+                    refresh.as_secs() % 60,
+                );
+                sleep(remaining.try_into().unwrap_or_default()).await;
+                return;
+            } else {
+                info!(
+                    "Sleeping till renewal info refresh: {}h{}m{}s",
+                    refresh.as_secs() / 3600,
+                    refresh.as_secs() % 3600 / 60,
+                    refresh.as_secs() % 60,
+                );
+                sleep(refresh).await;
+            }
+        }
+    }
+
+    if let Some(duration) = duration_till_renewal(&x509) {
+        sleep(duration).await;
+    }
+}
+
 async fn letsencrypt_loop(
     config: &Config,
     le: &LetsEncryptConfig,
     mut force_update: bool,
 ) -> Result<()> {
-    let store = certstore::CertStore::new(config.hostname.clone(), le.store.clone());
+    let store = CertStore::new(config.hostname.clone(), le.store.clone());
+    let account = loop {
+        match le.get_account().await {
+            Ok(a) => break a,
+            Err(e) => {
+                warn!("Failed to create LE account: {e}");
+                tokio::time::sleep(Duration::from_secs(60 * 15)).await;
+            }
+        }
+    };
+
+    for p in account.profiles() {
+        info!("Available profile: {}: {}", p.name, p.description);
+    }
 
     loop {
         store.cleanup_expired_certificates().await?;
-        if let Some(duration) = store.duration_till_renewal().await {
-            if force_update {
-                info!("Forcing certificate renewal");
-            } else {
-                sleep(duration).await;
-            }
+        if force_update {
+            info!("Forcing certificate renewal");
+        } else {
+            wait_for_renewal(&account, &store).await;
         }
-        info!("Renewing certificate");
-        match letsencrypt(config, le).await {
+        info!("Requesting certificate");
+        match request_certificate(&account, config).await {
             Ok((chain, key)) => {
                 store.insert_certificate(chain, key).await?;
                 force_update = false;
@@ -218,7 +358,7 @@ async fn letsencrypt_loop(
             Err(e) => {
                 warn!("Failed to get new letsencrypt certificate: {e:?}");
                 warn!("Retrying in 15 minutes");
-                tokio::time::sleep(Duration::from_secs(60 * 16)).await;
+                tokio::time::sleep(Duration::from_secs(60 * 15)).await;
             }
         }
     }
@@ -288,6 +428,7 @@ async fn monitor_address(config: &Config) -> Result<()> {
         } else {
             None
         };
+
         if current_best_v4 != best_v4 {
             changed = true;
         }
