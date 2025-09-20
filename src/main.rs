@@ -7,14 +7,14 @@ use domain::{
     resolv::stub,
 };
 use instant_acme::{
-    Account, AuthorizationStatus, CertificateIdentifier, ChallengeType, Identifier, LetsEncrypt,
-    NewAccount, NewOrder, OrderStatus, RetryPolicy,
+    Account, AccountCredentials, AuthorizationStatus, CertificateIdentifier, ChallengeType,
+    Identifier, LetsEncrypt, NewAccount, NewOrder, OrderStatus, RetryPolicy,
 };
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER;
-use serde::Deserialize;
-use std::{net::IpAddr, path::PathBuf, time::Duration};
-use tokio::{net::lookup_host, time::sleep};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, io::ErrorKind, net::IpAddr, path::PathBuf, time::Duration};
+use tokio::{io::AsyncWriteExt, net::lookup_host, time::sleep};
 use tracing::{info, warn};
 use x509_parser::prelude::{ParsedExtension, X509Certificate};
 
@@ -26,32 +26,128 @@ pub mod certstore;
 
 #[derive(Debug, Deserialize)]
 struct LetsEncryptConfig {
-    contacts: Vec<String>,
+    contacts: BTreeSet<String>,
+    profile: Option<String>,
     #[serde(default)]
     production: bool,
     store: PathBuf,
 }
 
-impl LetsEncryptConfig {
-    async fn get_account(&self) -> Result<Account> {
-        let contacts: Vec<_> = self.contacts.iter().map(|s| s.as_str()).collect();
+static ACCOUNT_FILENAME: &str = "account.yml";
 
-        let url = if self.production {
+#[derive(Serialize, Deserialize)]
+struct LeAccount {
+    contacts: BTreeSet<String>,
+    directory: String,
+    credentials: AccountCredentials,
+}
+
+impl LetsEncryptConfig {
+    fn directory(&self) -> &'static str {
+        if self.production {
             LetsEncrypt::Production.url()
         } else {
             LetsEncrypt::Staging.url()
+        }
+    }
+
+    async fn get_existing_account(&self) -> Result<Option<Account>> {
+        let account_path = self.store.join(ACCOUNT_FILENAME);
+
+        let data = match tokio::fs::read(&account_path).await {
+            Ok(data) => data,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => bail!(
+                "Failed to open account file ({}): {e}",
+                account_path.display()
+            ),
         };
-        let (account, _) = Account::builder()?
+
+        let stored: LeAccount = serde_yaml::from_slice(&data)
+            .with_context(|| format!("Failed to parse account from: {}", account_path.display()))?;
+        if self.directory() != stored.directory {
+            bail!("Saved account directory doesn't match expected directory");
+        }
+
+        info!("Loading stored account");
+        let account = Account::builder()?
+            .from_credentials(stored.credentials)
+            .await?;
+
+        if self.contacts != stored.contacts {
+            info!("Updating account contacts to match config");
+            let contacts: Vec<_> = self.contacts.iter().map(|s| s.as_str()).collect();
+            // We have to reparse as the credential data isn't clone :/
+            let stored: LeAccount = serde_yaml::from_slice(&data).with_context(|| {
+                format!("Failed to parse account from: {}", account_path.display())
+            })?;
+            account
+                .update_contacts(&contacts)
+                .await
+                .context("Failed to synchronize updated contacts")?;
+            self.save_credentials(stored.credentials)
+                .await
+                .context("Failed to store updated account")?;
+        }
+        Ok(Some(account))
+    }
+
+    async fn update_account_key(&self, account: &mut Account) -> Result<()> {
+        info!("Updating LE account key");
+        let creds = account
+            .update_key()
+            .await
+            .context("Failed to update account key")?;
+        self.save_credentials(creds).await?;
+        Ok(())
+    }
+
+    async fn save_credentials(&self, credentials: AccountCredentials) -> Result<()> {
+        tokio::fs::create_dir_all(&self.store)
+            .await
+            .context("Failed to create store directory")?;
+
+        let a = serde_yaml::to_string(&LeAccount {
+            contacts: self.contacts.clone(),
+            directory: self.directory().to_string(),
+            credentials,
+        })
+        .context("Serializing le account data")?;
+
+        let account_path = self.store.join(ACCOUNT_FILENAME);
+        let mut file = tokio::fs::OpenOptions::new()
+            .mode(0o600)
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(account_path)
+            .await
+            .context("Failed to open account file")?;
+        file.write_all(a.as_bytes())
+            .await
+            .context("Failed to write to account file")?;
+        file.flush().await.context("Failed to flush account file")?;
+        Ok(())
+    }
+
+    async fn get_new_account(&self) -> Result<Account> {
+        let contacts: Vec<_> = self.contacts.iter().map(|s| s.as_str()).collect();
+        info!("Setting up new account on {}", self.directory());
+        let (account, credentials) = Account::builder()?
             .create(
                 &NewAccount {
                     contact: &contacts,
                     terms_of_service_agreed: true,
                     only_return_existing: false,
                 },
-                url.to_string(),
+                self.directory().to_string(),
                 None,
             )
-            .await?;
+            .await
+            .context("Failed to create account")?;
+
+        self.save_credentials(credentials).await?;
+
         Ok(account)
     }
 }
@@ -73,7 +169,6 @@ pub struct Config {
     server: String,
     zone: String,
     hostname: String,
-    profile: Option<String>,
     key: Key,
     letsencrypt: Option<LetsEncryptConfig>,
     addresses: AddressesConfig,
@@ -141,24 +236,64 @@ async fn ensure_txt_is_everywhere(config: &Config, name: &str, value: &str) -> R
     Ok(())
 }
 
-async fn request_certificate(account: &Account, config: &Config) -> Result<(String, String)> {
-    let identifiers = &[Identifier::Dns(config.hostname.clone())];
+fn setup_order<'a>(
+    identifiers: &'a [Identifier],
+    profile: Option<&'a str>,
+    replaces: Option<CertificateIdentifier<'a>>,
+) -> NewOrder<'a> {
     let order = NewOrder::new(identifiers);
-    let order = if let Some(profile) = &config.profile {
-        info!("Ordering certificate with profile: {profile}");
+    let order = if let Some(profile) = profile {
+        info!("Creating Order with profile: {profile}");
         order.profile(profile)
     } else {
         order
     };
-    let mut order = account.new_order(&order).await?;
+
+    if let Some(replaces) = replaces {
+        info!("Replacing old certificate");
+        order.replaces(replaces)
+    } else {
+        order
+    }
+}
+async fn do_request_certificate(
+    account: &Account,
+    profile: Option<&str>,
+    config: &Config,
+    x509: Option<&X509Certificate<'_>>,
+) -> Result<(String, String)> {
+    let identifiers = &[Identifier::Dns(config.hostname.clone())];
+    let old = x509.and_then(|x| x509_to_identifier(x));
+
+    let order = setup_order(identifiers, profile, old);
+    let mut order = match account.new_order(&order).await {
+        Err(instant_acme::Error::Unsupported(e)) => {
+            warn!("Unsupported: {e}, retrying without replacement");
+            let order = setup_order(identifiers, profile, None);
+            account.new_order(&order).await
+        }
+        Err(instant_acme::Error::Api(ref p @ instant_acme::Problem { ref r#type, .. }))
+            if r#type.as_deref() == Some("urn:ietf:params:acme:error:unauthorized") =>
+        {
+            warn!("unauthorized: {p}, retrying without replacement");
+            let order = setup_order(identifiers, profile, None);
+            account.new_order(&order).await
+        }
+        o => o,
+    }?;
 
     info!("Certificate order state: {:#?}", order.state().status);
     let mut authorizations = order.authorizations();
 
     while let Some(mut authz) = authorizations.next().await.transpose()? {
         match &authz.status {
-            AuthorizationStatus::Pending => {}
-            AuthorizationStatus::Valid => continue,
+            AuthorizationStatus::Pending => {
+                info!("Pending authorization");
+            }
+            AuthorizationStatus::Valid => {
+                info!("Valid authorization");
+                continue;
+            }
             s => bail!("Unhandled authorization status: {:?}", s),
         }
 
@@ -189,24 +324,33 @@ async fn request_certificate(account: &Account, config: &Config) -> Result<(Stri
 
     let status = order.poll_ready(&RetryPolicy::default()).await?;
 
-    // Done; we can clear the TXT record
-    let mut update = dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
-    update.clear_txt(&format!("_acme-challenge.{}", &config.hostname))?;
-    update.update().await?;
-
-    info!("Certificate order state {:?}", status);
-
     if status == OrderStatus::Ready {
         let keypair = order.finalize().await?;
-        let cert_chain_pem = order
-            .certificate()
-            .await?
-            .ok_or_else(|| anyhow!("Didn't get a certificate"))?;
-
+        let cert_chain_pem = order.poll_certificate(&RetryPolicy::default()).await?;
         Ok((cert_chain_pem, keypair))
     } else {
         bail!("Failed to retrieve certificate")
     }
+}
+
+async fn request_certificate(
+    account: &Account,
+    profile: Option<&str>,
+    config: &Config,
+    x509: Option<&X509Certificate<'_>>,
+) -> Result<(String, String)> {
+    let ret = do_request_certificate(account, profile, config, x509).await;
+
+    // Clear the TXT record in all cases
+    info!("Clearing txt record");
+    let mut update = dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
+    if let Err(e) = update.clear_txt(&format!("_acme-challenge.{}", &config.hostname)) {
+        warn!("Failed to setup clear txt update: {e}");
+    } else if let Err(e) = update.update().await {
+        warn!("Failed to sent clear update: {e}");
+    }
+
+    ret
 }
 
 // Time until the current certificate should be renewed; Returns None if it should be renewed
@@ -239,39 +383,31 @@ fn duration_till_renewal(x509: &X509Certificate) -> Option<Duration> {
     }
 }
 
-async fn wait_for_renewal(account: &Account, store: &CertStore) {
-    let Some(cert) = store.current_cert().await else {
-        info!("No current certificate");
-        return;
-    };
-
-    let x509 = match cert.parse_x509() {
-        Ok(cert) => cert,
-        Err(e) => {
-            info!("Failed to parse current certificate: {}", e);
-            return;
-        }
-    };
-
-    let validity = x509.validity();
-    info!("Current certificate valid until: {}", validity.not_after);
-
+fn x509_to_identifier<'a>(x509: &X509Certificate<'a>) -> Option<CertificateIdentifier<'a>> {
     let aki = match x509.get_extension_unique(&OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER) {
         Ok(aki) => aki,
         Err(e) => {
             warn!("Failed to parse Authority Key Identifier: {e}");
             None
         }
-    };
+    }?;
 
-    let identifier = aki.and_then(|o| match o.parsed_extension() {
-        ParsedExtension::AuthorityKeyIdentifier(aki) => aki.key_identifier.clone(),
+    let identifier = match aki.parsed_extension() {
+        ParsedExtension::AuthorityKeyIdentifier(aki) => aki.key_identifier.as_ref(),
         _ => None,
-    });
+    }?;
 
-    if let Some(identifier) = identifier {
-        let identifier = CertificateIdentifier::new(identifier.0.into(), x509.raw_serial().into());
+    Some(CertificateIdentifier::new(
+        identifier.0.into(),
+        x509.raw_serial().into(),
+    ))
+}
 
+async fn wait_for_renewal(account: &Account, x509: &X509Certificate<'_>) {
+    let validity = x509.validity();
+    info!("Current certificate valid until: {}", validity.not_after);
+
+    if let Some(identifier) = x509_to_identifier(x509) {
         loop {
             let (renewal, refresh) = match account.renewal_info(&identifier).await {
                 Ok(v) => v,
@@ -285,6 +421,11 @@ async fn wait_for_renewal(account: &Account, store: &CertStore) {
                     continue;
                 }
             };
+
+            info!(
+                "Renewal window: {} - {}",
+                renewal.suggested_window.start, renewal.suggested_window.end
+            );
 
             let diff = renewal.suggested_window.end - renewal.suggested_window.start;
             let diff = diff.try_into().unwrap_or_else(|_| {
@@ -317,40 +458,39 @@ async fn wait_for_renewal(account: &Account, store: &CertStore) {
         }
     }
 
-    if let Some(duration) = duration_till_renewal(&x509) {
+    if let Some(duration) = duration_till_renewal(x509) {
         sleep(duration).await;
     }
 }
 
 async fn letsencrypt_loop(
+    account: Account,
+    profile: Option<&str>,
+    store: &CertStore,
     config: &Config,
-    le: &LetsEncryptConfig,
     mut force_update: bool,
 ) -> Result<()> {
-    let store = CertStore::new(config.hostname.clone(), le.store.clone());
-    let account = loop {
-        match le.get_account().await {
-            Ok(a) => break a,
-            Err(e) => {
-                warn!("Failed to create LE account: {e}");
-                tokio::time::sleep(Duration::from_secs(60 * 15)).await;
-            }
-        }
-    };
-
-    for p in account.profiles() {
-        info!("Available profile: {}: {}", p.name, p.description);
-    }
-
     loop {
         store.cleanup_expired_certificates().await?;
+        let pem = store.current_cert().await;
+        let x509 = pem.as_ref().and_then(|cert| match cert.parse_x509() {
+            Ok(cert) => Some(cert),
+            Err(e) => {
+                info!("Failed to parse current certificate: {}", e);
+                None
+            }
+        });
+
         if force_update {
             info!("Forcing certificate renewal");
+        } else if let Some(x509) = x509.as_ref() {
+            wait_for_renewal(&account, x509).await;
         } else {
-            wait_for_renewal(&account, &store).await;
-        }
+            info!("No current certificate");
+        };
+
         info!("Requesting certificate");
-        match request_certificate(&account, config).await {
+        match request_certificate(&account, profile, config, x509.as_ref()).await {
             Ok((chain, key)) => {
                 store.insert_certificate(chain, key).await?;
                 force_update = false;
@@ -465,6 +605,12 @@ struct Opts {
     /// Force an update of the LE certificate on startup
     #[clap(short, long)]
     force_le_update: bool,
+    /// Deactivate acme account and exit
+    #[clap(long)]
+    deactive_account: bool,
+    /// Update acme account key at startup
+    #[clap(long)]
+    update_account_key: bool,
 }
 
 #[tokio::main]
@@ -472,13 +618,48 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
     let opts = Opts::parse();
 
-    let config = tokio::fs::read(opts.config).await?;
-    let config: Config = serde_yaml::from_slice(&config)?;
+    let config = tokio::fs::read(opts.config)
+        .await
+        .context("Failed to read config file")?;
+    let config: Config = serde_yaml::from_slice(&config).context("Failed to parse config")?;
+
+    if opts.deactive_account {
+        let Some(le) = &config.letsencrypt else {
+            bail!("Can't deactivate an account without a letsencrypt config");
+        };
+        let Some(a) = le.get_existing_account().await? else {
+            bail!("No account found");
+        };
+        a.deactivate().await?;
+        return Ok(());
+    }
 
     let monitor = monitor_address(&config);
 
     if let Some(le) = &config.letsencrypt {
-        let le_loop = letsencrypt_loop(&config, le, opts.force_le_update);
+        let account = if let Some(mut a) = le.get_existing_account().await? {
+            if opts.update_account_key {
+                le.update_account_key(&mut a).await?
+            }
+            a
+        } else {
+            le.get_new_account()
+                .await
+                .context("Failed to create LE account:")?
+        };
+
+        for p in account.profiles() {
+            info!("Available profile: {}: {}", p.name, p.description);
+        }
+
+        let store = CertStore::new(config.hostname.clone(), le.store.clone());
+        let le_loop = letsencrypt_loop(
+            account,
+            le.profile.as_deref(),
+            &store,
+            &config,
+            opts.force_le_update,
+        );
 
         tokio::select! {
             m = monitor => {

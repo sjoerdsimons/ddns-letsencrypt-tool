@@ -139,7 +139,7 @@ impl CertStore {
 
         let hostpath = self.host_path();
         let mut certpath = hostpath.clone();
-        certpath.push(serial);
+        certpath.push(&serial);
         tokio::fs::create_dir_all(&certpath)
             .await
             .context("Failed to create directory for certifcate storage")?;
@@ -164,7 +164,8 @@ impl CertStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
             e => e.context("Failed to remove temp symlink")?,
         }
-        tokio::fs::symlink(&certpath, &current_tmp)
+
+        tokio::fs::symlink(&serial, &current_tmp)
             .await
             .context("Failed to create temporary symlink")?;
         tokio::fs::rename(&current_tmp, &current)
