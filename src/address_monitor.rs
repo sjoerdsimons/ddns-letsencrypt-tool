@@ -7,6 +7,7 @@ use ipnetwork::IpNetwork;
 use netlink_packet_core::NetlinkMessage;
 use netlink_packet_core::NetlinkPayload;
 
+use netlink_packet_route::RouteNetlinkMessage;
 use netlink_packet_route::address::AddressAttribute;
 use netlink_packet_route::address::AddressMessage;
 use netlink_packet_route::address::AddressScope;
@@ -14,7 +15,6 @@ use netlink_packet_route::link::LinkAttribute;
 use netlink_packet_route::link::LinkFlags;
 use netlink_packet_route::link::LinkMessage;
 use netlink_packet_route::link::State;
-use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::{AsyncSocket, SocketAddr};
 use rtnetlink::{
     constants::{RTMGRP_IPV4_IFADDR, RTMGRP_IPV6_IFADDR, RTMGRP_LINK},

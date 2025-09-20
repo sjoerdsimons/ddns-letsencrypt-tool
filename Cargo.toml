@@ -1,12 +1,13 @@
 [package]
 name = "ddns-letsencrypt-tool"
 version = "0.1.1"
-edition = "2021"
+edition = "2024"
 authors = ["Sjoerd Simons <sjoerd@luon.net>"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 description = "A simple rust tool that combines an RFC2136 dynamic dns updates client with an acme client supporting the dns01 challenge protocol."
 repository = "https://github.com/sjoerdsimons/ddns-letsencrypt-tool"
+rust-version = "1.86"
 
 [dependencies]
 anyhow = "1.0.69"
