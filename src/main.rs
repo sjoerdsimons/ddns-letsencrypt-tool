@@ -1,5 +1,5 @@
 use address_monitor::AddressMonitor;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use certstore::CertStore;
 use clap::Parser;
 use domain::{
@@ -519,11 +519,7 @@ fn find_best_v4(m: &AddressMonitor) -> Option<Ipv4Network> {
                 _ => (),
             }
             // Deterministically pick the smallest if all else is equal
-            if a < b {
-                a
-            } else {
-                b
-            }
+            if a < b { a } else { b }
         })
 }
 

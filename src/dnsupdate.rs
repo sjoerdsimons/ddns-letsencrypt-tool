@@ -1,17 +1,17 @@
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use domain::base::message_builder::AuthorityBuilder;
-use domain::rdata::tsig::Time48;
-use domain::rdata::Txt;
 use domain::rdata::A;
+use domain::rdata::Txt;
+use domain::rdata::tsig::Time48;
 use domain::tsig;
 use domain::tsig::KeyName;
 use serde::Deserialize;
+use serde_with::DisplayFromStr;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
-use serde_with::DisplayFromStr;
 use tracing::info;
 
 use std::collections::HashSet;
@@ -19,8 +19,8 @@ use std::{net::IpAddr, str::FromStr};
 
 use domain::{
     base::{
-        iana::{Class, Opcode},
         MessageBuilder, Name, Rtype,
+        iana::{Class, Opcode},
     },
     rdata::Aaaa,
     tsig::Algorithm,
