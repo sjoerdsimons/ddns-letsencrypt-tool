@@ -18,7 +18,7 @@ futures = "0.3.27"
 instant-acme = { version = "0.8.2", features = ["time"] }
 ipnetwork = "0.21.1"
 netlink-packet-core = "0.8"
-netlink-packet-route = "0.25.1"
+netlink-packet-route = "0.27.0"
 netlink-sys = "0.8.5"
 oid-registry = "0.8.1"
 rand = "0.9.2"
