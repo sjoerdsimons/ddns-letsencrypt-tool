@@ -23,7 +23,7 @@ use rtnetlink::{
 use std::collections::{HashMap, HashSet};
 
 use thiserror::Error;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Error, Debug)]
 pub enum ListenError {
