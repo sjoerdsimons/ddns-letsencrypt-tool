@@ -158,10 +158,10 @@ impl AddressMonitor {
     }
 
     async fn handle_del_link(&mut self, msg: &LinkMessage) {
-        if let Some((link, ifname, _)) = Self::parse_link_message(msg) {
-            if let Some(_info) = self.links.remove(&link) {
-                info!("Link {} ({}) removed", ifname, link.index);
-            }
+        if let Some((link, ifname, _)) = Self::parse_link_message(msg)
+            && let Some(_info) = self.links.remove(&link)
+        {
+            info!("Link {} ({}) removed", ifname, link.index);
         }
     }
 
