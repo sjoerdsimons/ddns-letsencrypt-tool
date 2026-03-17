@@ -21,6 +21,7 @@ use rtnetlink::{
     new_connection,
 };
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -46,14 +47,16 @@ pub struct Address {
 struct LinkInfo {
     addrs: HashSet<Address>,
     state: State,
+    flags: LinkFlags,
     ifname: String,
 }
 
 impl LinkInfo {
-    fn new(ifname: &str, state: State) -> Self {
+    fn new(ifname: &str, state: State, flags: LinkFlags) -> Self {
         LinkInfo {
             addrs: HashSet::new(),
             state,
+            flags,
             ifname: ifname.to_string(),
         }
     }
@@ -106,22 +109,21 @@ impl AddressMonitor {
         self.links
             .values()
             .filter_map(|info| {
-                if info.state == State::Up {
-                    Some(info.addrs.iter())
-                } else {
-                    None
-                }
+                let is_up = info.state == State::Up
+                    || (info.state == State::Unknown && info.flags.contains(LinkFlags::Running));
+                if is_up { Some(info.addrs.iter()) } else { None }
             })
             .flatten()
     }
 
-    fn parse_link_message(msg: &LinkMessage) -> Option<(Link, &str, State)> {
+    fn parse_link_message(msg: &LinkMessage) -> Option<(Link, &str, State, LinkFlags)> {
         if msg.header.flags.contains(LinkFlags::Loopback) {
             return None;
         }
         let link = Link {
             index: msg.header.index,
         };
+        let flags = msg.header.flags;
         let mut ifname: Option<&str> = None;
         let mut state: Option<State> = None;
 
@@ -133,7 +135,7 @@ impl AddressMonitor {
             }
         }
         if let (Some(ifname), Some(state)) = (ifname, state) {
-            Some((link, ifname, state))
+            Some((link, ifname, state, flags))
         } else {
             warn!(
                 "Couldn't parse message, either ifname or state missing) msg={:?}",
@@ -144,21 +146,22 @@ impl AddressMonitor {
     }
 
     async fn handle_new_link(&mut self, msg: &LinkMessage) {
-        if let Some((link, ifname, state)) = Self::parse_link_message(msg) {
+        if let Some((link, ifname, state, flags)) = Self::parse_link_message(msg) {
             if let Some(info) = self.links.get_mut(&link) {
-                if info.state != state {
+                if info.state != state || info.flags != flags {
                     info.state = state;
+                    info.flags = flags;
                     info!("{} ({})  state changed to {:?}", ifname, link.index, state);
                 }
             } else {
                 info!("Link {} ({}) added, state {:?}", ifname, link.index, state);
-                self.links.insert(link, LinkInfo::new(ifname, state));
+                self.links.insert(link, LinkInfo::new(ifname, state, flags));
             }
         }
     }
 
     async fn handle_del_link(&mut self, msg: &LinkMessage) {
-        if let Some((link, ifname, _)) = Self::parse_link_message(msg)
+        if let Some((link, ifname, _, _)) = Self::parse_link_message(msg)
             && let Some(_info) = self.links.remove(&link)
         {
             info!("Link {} ({}) removed", ifname, link.index);
@@ -174,10 +177,18 @@ impl AddressMonitor {
             index: msg.header.index,
         };
 
-        let ip = msg.attributes.iter().find_map(|a| match a {
-            AddressAttribute::Address(ip) => Some(ip),
-            _ => None,
-        });
+        let mut local_ip: Option<&IpAddr> = None;
+        let mut addr_ip: Option<&IpAddr> = None;
+        for a in &msg.attributes {
+            match a {
+                AddressAttribute::Local(ip) => local_ip = Some(ip),
+                AddressAttribute::Address(ip) => addr_ip = Some(ip),
+                _ => (),
+            }
+        }
+        // For point-to-point links (e.g. ppp0), IFA_LOCAL is the local address
+        // while IFA_ADDRESS is the remote peer's address. Prefer Local over Address.
+        let ip = local_ip.or(addr_ip);
 
         if let Some(ip) = ip {
             let ip = IpNetwork::new(*ip, msg.header.prefix_len).ok()?;
