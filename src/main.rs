@@ -24,6 +24,29 @@ use crate::dnsupdate::Key;
 pub mod address_monitor;
 pub mod certstore;
 
+const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
+
+/// Retries `operation` with exponential backoff on failure, logging each attempt.
+/// Delays start at [`RETRY_INITIAL_DELAY`], doubling each time up to [`RETRY_MAX_DELAY`].
+async fn retry_with_backoff<F, Fut, T>(description: &str, mut operation: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut delay = RETRY_INITIAL_DELAY;
+    loop {
+        match operation().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                warn!("{description}, retrying in {}s: {e}", delay.as_secs());
+                sleep(delay).await;
+                delay = delay.saturating_mul(2).min(RETRY_MAX_DELAY);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct LetsEncryptConfig {
     contacts: BTreeSet<String>,
@@ -70,21 +93,30 @@ impl LetsEncryptConfig {
         }
 
         info!("Loading stored account");
-        let account = Account::builder()?
-            .from_credentials(stored.credentials)
-            .await?;
+        // AccountCredentials is not Clone, so re-parse from the in-memory bytes each attempt.
+        // Non-network errors (e.g. YAML parse failure) propagate immediately via `?`.
+        let account = retry_with_backoff("Failed to load stored account", || async {
+            let stored: LeAccount = serde_yaml::from_slice(&data).with_context(|| {
+                format!("Failed to parse account from: {}", account_path.display())
+            })?;
+            Account::builder()?
+                .from_credentials(stored.credentials)
+                .await
+                .map_err(anyhow::Error::from)
+        })
+        .await?;
 
         if self.contacts != stored.contacts {
             info!("Updating account contacts to match config");
             let contacts: Vec<_> = self.contacts.iter().map(|s| s.as_str()).collect();
-            // We have to reparse as the credential data isn't clone :/
-            let stored: LeAccount = serde_yaml::from_slice(&data).with_context(|| {
-                format!("Failed to parse account from: {}", account_path.display())
-            })?;
-            account
-                .update_contacts(&contacts)
-                .await
-                .context("Failed to synchronize updated contacts")?;
+            retry_with_backoff("Failed to update account contacts", || async {
+                account
+                    .update_contacts(&contacts)
+                    .await
+                    .map_err(anyhow::Error::from)
+            })
+            .await
+            .context("Failed to synchronize updated contacts")?;
             self.save_credentials(stored.credentials)
                 .await
                 .context("Failed to store updated account")?;
@@ -94,10 +126,22 @@ impl LetsEncryptConfig {
 
     async fn update_account_key(&self, account: &mut Account) -> Result<()> {
         info!("Updating LE account key");
-        let creds = account
-            .update_key()
-            .await
-            .context("Failed to update account key")?;
+        let creds = {
+            let mut delay = RETRY_INITIAL_DELAY;
+            loop {
+                match account.update_key().await {
+                    Ok(creds) => break creds,
+                    Err(e) => {
+                        warn!(
+                            "Failed to update account key, retrying in {}s: {e}",
+                            delay.as_secs()
+                        );
+                        sleep(delay).await;
+                        delay = delay.saturating_mul(2).min(RETRY_MAX_DELAY);
+                    }
+                }
+            }
+        };
         self.save_credentials(creds).await?;
         Ok(())
     }
@@ -133,18 +177,22 @@ impl LetsEncryptConfig {
     async fn get_new_account(&self) -> Result<Account> {
         let contacts: Vec<_> = self.contacts.iter().map(|s| s.as_str()).collect();
         info!("Setting up new account on {}", self.directory());
-        let (account, credentials) = Account::builder()?
-            .create(
-                &NewAccount {
-                    contact: &contacts,
-                    terms_of_service_agreed: true,
-                    only_return_existing: false,
-                },
-                self.directory().to_string(),
-                None,
-            )
-            .await
-            .context("Failed to create account")?;
+        let (account, credentials) = retry_with_backoff("Failed to create account", || async {
+            Account::builder()?
+                .create(
+                    &NewAccount {
+                        contact: &contacts,
+                        terms_of_service_agreed: true,
+                        only_return_existing: false,
+                    },
+                    self.directory().to_string(),
+                    None,
+                )
+                .await
+                .map_err(anyhow::Error::from)
+        })
+        .await
+        .context("Failed to create account")?;
 
         self.save_credentials(credentials).await?;
 
