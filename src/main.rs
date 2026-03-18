@@ -13,8 +13,11 @@ use instant_acme::{
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, io::ErrorKind, net::IpAddr, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeSet, io::ErrorKind, net::IpAddr, path::PathBuf, sync::Arc, time::Duration,
+};
 use tokio::{io::AsyncWriteExt, net::lookup_host, time::sleep};
+use tokio_retry2::{Retry, RetryError, strategy::ExponentialFactorBackoff};
 use tracing::{info, warn};
 use x509_parser::prelude::{ParsedExtension, X509Certificate};
 
@@ -24,27 +27,10 @@ use crate::dnsupdate::Key;
 pub mod address_monitor;
 pub mod certstore;
 
-const RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
-const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
-
-/// Retries `operation` with exponential backoff on failure, logging each attempt.
-/// Delays start at [`RETRY_INITIAL_DELAY`], doubling each time up to [`RETRY_MAX_DELAY`].
-async fn retry_with_backoff<F, Fut, T>(description: &str, mut operation: F) -> Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T>>,
-{
-    let mut delay = RETRY_INITIAL_DELAY;
-    loop {
-        match operation().await {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                warn!("{description}, retrying in {}s: {e}", delay.as_secs());
-                sleep(delay).await;
-                delay = delay.saturating_mul(2).min(RETRY_MAX_DELAY);
-            }
-        }
-    }
+/// Exponential backoff starting at 1 s, doubling each time, capped at 60 s.
+/// Used for all startup network operations (ACME account load, create, key update).
+fn startup_retry_strategy() -> impl Iterator<Item = Duration> {
+    ExponentialFactorBackoff::from_millis(1000, 2.0).max_delay(Duration::from_secs(60))
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,29 +78,52 @@ impl LetsEncryptConfig {
             bail!("Saved account directory doesn't match expected directory");
         }
 
+        // Serialize the credentials once into Arc'd bytes so each retry attempt
+        // can cheaply clone the Arc and deserialize only the credentials, avoiding
+        // a full re-parse of the account file on every attempt.
+        let creds_bytes: Arc<Vec<u8>> = Arc::new(
+            serde_yaml::to_string(&stored.credentials)
+                .context("Failed to serialize account credentials")?
+                .into_bytes(),
+        );
+
         info!("Loading stored account");
-        // AccountCredentials is not Clone, so re-parse from the in-memory bytes each attempt.
-        // Non-network errors (e.g. YAML parse failure) propagate immediately via `?`.
-        let account = retry_with_backoff("Failed to load stored account", || async {
-            let stored: LeAccount = serde_yaml::from_slice(&data).with_context(|| {
-                format!("Failed to parse account from: {}", account_path.display())
-            })?;
-            Account::builder()?
-                .from_credentials(stored.credentials)
-                .await
-                .map_err(anyhow::Error::from)
-        })
+        let account: Account = Retry::spawn_notify(
+            startup_retry_strategy(),
+            || {
+                let creds_bytes = creds_bytes.clone();
+                async move {
+                    let creds: AccountCredentials = serde_yaml::from_slice(&creds_bytes)
+                        .map_err(|e| RetryError::transient(anyhow::Error::from(e)))?;
+                    let account = Account::builder()
+                        .map_err(|e| RetryError::transient(anyhow::Error::from(e)))?
+                        .from_credentials(creds)
+                        .await
+                        .map_err(|e| RetryError::transient(anyhow::Error::from(e)))?;
+                    Ok(account)
+                }
+            },
+            |err: &anyhow::Error, duration: Duration| {
+                warn!("Failed to load stored account, retrying in {duration:?}: {err}");
+            },
+        )
         .await?;
 
         if self.contacts != stored.contacts {
             info!("Updating account contacts to match config");
             let contacts: Vec<_> = self.contacts.iter().map(|s| s.as_str()).collect();
-            retry_with_backoff("Failed to update account contacts", || async {
-                account
-                    .update_contacts(&contacts)
-                    .await
-                    .map_err(anyhow::Error::from)
-            })
+            Retry::spawn_notify(
+                startup_retry_strategy(),
+                || async {
+                    account
+                        .update_contacts(&contacts)
+                        .await
+                        .map_err(|e| RetryError::transient(anyhow::Error::from(e)))
+                },
+                |err: &anyhow::Error, duration: Duration| {
+                    warn!("Failed to update account contacts, retrying in {duration:?}: {err}");
+                },
+            )
             .await
             .context("Failed to synchronize updated contacts")?;
             self.save_credentials(stored.credentials)
@@ -126,18 +135,18 @@ impl LetsEncryptConfig {
 
     async fn update_account_key(&self, account: &mut Account) -> Result<()> {
         info!("Updating LE account key");
+        // `Account::update_key` takes `&mut self`, so it cannot be moved into
+        // a `FnMut` closure for `Retry::spawn`.  Use the shared strategy iterator
+        // directly instead.
         let creds = {
-            let mut delay = RETRY_INITIAL_DELAY;
+            let mut strategy = startup_retry_strategy();
             loop {
                 match account.update_key().await {
                     Ok(creds) => break creds,
                     Err(e) => {
-                        warn!(
-                            "Failed to update account key, retrying in {}s: {e}",
-                            delay.as_secs()
-                        );
+                        let delay = strategy.next().unwrap_or(Duration::from_secs(60));
+                        warn!("Failed to update account key, retrying in {delay:?}: {e}");
                         sleep(delay).await;
-                        delay = delay.saturating_mul(2).min(RETRY_MAX_DELAY);
                     }
                 }
             }
@@ -177,20 +186,28 @@ impl LetsEncryptConfig {
     async fn get_new_account(&self) -> Result<Account> {
         let contacts: Vec<_> = self.contacts.iter().map(|s| s.as_str()).collect();
         info!("Setting up new account on {}", self.directory());
-        let (account, credentials) = retry_with_backoff("Failed to create account", || async {
-            Account::builder()?
-                .create(
-                    &NewAccount {
-                        contact: &contacts,
-                        terms_of_service_agreed: true,
-                        only_return_existing: false,
-                    },
-                    self.directory().to_string(),
-                    None,
-                )
-                .await
-                .map_err(anyhow::Error::from)
-        })
+        let (account, credentials) = Retry::spawn_notify(
+            startup_retry_strategy(),
+            || async {
+                let (account, creds) = Account::builder()
+                    .map_err(|e| RetryError::transient(anyhow::Error::from(e)))?
+                    .create(
+                        &NewAccount {
+                            contact: &contacts,
+                            terms_of_service_agreed: true,
+                            only_return_existing: false,
+                        },
+                        self.directory().to_string(),
+                        None,
+                    )
+                    .await
+                    .map_err(|e| RetryError::transient(anyhow::Error::from(e)))?;
+                Ok((account, creds))
+            },
+            |err: &anyhow::Error, duration: Duration| {
+                warn!("Failed to create account, retrying in {duration:?}: {err}");
+            },
+        )
         .await
         .context("Failed to create account")?;
 
