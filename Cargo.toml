@@ -18,11 +18,11 @@ futures = "0.3.27"
 instant-acme = { version = "0.8.2", features = ["time"] }
 ipnetwork = "0.21.1"
 netlink-packet-core = "0.8"
-netlink-packet-route = "0.25.1"
-netlink-sys = "0.8.5"
+netlink-packet-route = "0.28.0"
+netlink-sys = "0.8.8"
 oid-registry = "0.8.1"
 rand = "0.10.0"
-rtnetlink = "0.18"
+rtnetlink = "0.20.0"
 serde = { version = "1.0.154", features = ["derive"] }
 serde_with = { version = "3.4", features = ["base64"] }
 serde_yaml = "0.9.19"
