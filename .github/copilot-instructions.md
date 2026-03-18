@@ -28,7 +28,7 @@ data/
 
 ## Language & Toolchain
 
-- **Language:** Rust (edition 2024, MSRV 1.90)
+- **Language:** Rust (edition 2024); the minimum supported Rust version (MSRV) is updated over time, tracking what is available in Debian stable backports
 - **Async runtime:** Tokio (full features)
 - **Key libraries:** `instant-acme`, `domain` (DNS), `rtnetlink`, `serde`/`serde_yaml`, `clap`, `tracing`
 
