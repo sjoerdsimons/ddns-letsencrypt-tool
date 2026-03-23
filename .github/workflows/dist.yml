@@ -46,7 +46,7 @@ jobs:
           cp -v data/* ${OUTDIR}
           tar cvzf ${OUTDIR}.tar.gz ${OUTDIR}
       - name: Upload release binaries
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{env.OUTDIR}}
           path: ${{env.OUTDIR}}.tar.gz
