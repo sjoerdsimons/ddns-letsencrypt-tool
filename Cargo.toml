@@ -13,7 +13,7 @@ rust-version = "1.90"
 anyhow = "1.0.69"
 async-trait = "0.1.66"
 clap = { version = "4.1.8", features = ["derive"] }
-domain = { version = "0.11.0", features = ["serde", "tsig", "resolv", "tokio"] }
+domain = { version = "0.11.1", features = ["serde", "tsig", "resolv", "tokio"] }
 futures = "0.3.27"
 instant-acme = { version = "0.8.2", features = ["time"] }
 ipnetwork = "0.21.1"
