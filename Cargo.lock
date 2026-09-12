@@ -429,7 +429,6 @@ dependencies = [
  "instant-acme",
  "ipnetwork",
  "netlink-packet-core",
- "netlink-packet-route",
  "netlink-sys",
  "oid-registry",
  "rand",

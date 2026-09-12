@@ -366,7 +366,7 @@ async fn do_request_certificate(
             .challenge(ChallengeType::Dns01)
             .ok_or_else(|| anyhow!("No dns01 challenge found"))?;
 
-        let challenge_name = format!("_acme-challenge.{}", &config.hostname);
+        let challenge_name = format!("_acme-challenge.{}", config.hostname);
         let challenge_value = challenge.key_authorization().dns_value();
 
         let mut update = dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
@@ -409,7 +409,7 @@ async fn request_certificate(
     // Clear the TXT record in all cases
     info!("Clearing txt record");
     let mut update = dnsupdate::Update::new(&config.server, &config.zone, config.key.clone());
-    if let Err(e) = update.clear_txt(&format!("_acme-challenge.{}", &config.hostname)) {
+    if let Err(e) = update.clear_txt(&format!("_acme-challenge.{}", config.hostname)) {
         warn!("Failed to setup clear txt update: {e}");
     } else if let Err(e) = update.update().await {
         warn!("Failed to sent clear update: {e}");

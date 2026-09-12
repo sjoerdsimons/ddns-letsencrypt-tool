@@ -233,7 +233,7 @@ impl Update {
 
         let msg = additional.into_message();
 
-        let mut servers = tokio::net::lookup_host(format!("{}:53", &self.server))
+        let mut servers = tokio::net::lookup_host(format!("{}:53", self.server))
             .await
             .with_context(|| format!("Server lookup failed: {}", self.server))?;
         let addr = servers
