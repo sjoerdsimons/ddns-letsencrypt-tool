@@ -430,7 +430,7 @@ dependencies = [
  "ipnetwork",
  "netlink-packet-core",
  "netlink-packet-route",
- "netlink-sys",
+ "netlink-sys 0.9.0",
  "oid-registry",
  "rand",
  "rtnetlink",
@@ -1176,7 +1176,7 @@ dependencies = [
  "futures",
  "log",
  "netlink-packet-core",
- "netlink-sys",
+ "netlink-sys 0.8.8",
  "thiserror 2.0.16",
 ]
 
@@ -1191,6 +1191,17 @@ dependencies = [
  "libc",
  "log",
  "tokio",
+]
+
+[[package]]
+name = "netlink-sys"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c99d38e00b420df49e940fe0826e667c3dad82ac68eb4c2bbf754c1c14a83a10"
+dependencies = [
+ "bytes",
+ "libc",
+ "log",
 ]
 
 [[package]]
@@ -1516,7 +1527,7 @@ dependencies = [
  "netlink-packet-core",
  "netlink-packet-route",
  "netlink-proto",
- "netlink-sys",
+ "netlink-sys 0.8.8",
  "nix",
  "thiserror 1.0.69",
  "tokio",
